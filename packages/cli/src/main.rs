@@ -51,6 +51,10 @@ struct SsufidDaemonOptions {
     #[arg(short = 'l', long = "limit", default_value_t = SsufidCore::POST_COUNT_LIMIT)]
     posts_limit: u32,
 
+    /// Include calendar events whose start time is within the last N days. Use 0 for no date limit.
+    #[arg(long = "calendar-limit-days", default_value_t = SsufidCore::CALENDAR_DAY_LIMIT)]
+    calendar_limit_days: u32,
+
     /// The sites to include in the fetch. By default, all sites are included.
     /// This will override the default sites.
     #[arg(short = 'i', long, value_delimiter = ',')]
@@ -192,11 +196,11 @@ pub(crate) async fn save_calendar_run<T: SsufidCalendarPlugin>(
     core: Arc<SsufidCore>,
     base_out_dir: &Path,
     plugin: T,
-    limit: u32,
+    calendar_limit_days: u32,
     retry_count: u32,
 ) -> eyre::Result<()> {
     let site = core
-        .run_calendar_with_retry(&plugin, limit, retry_count)
+        .run_calendar_with_retry(&plugin, calendar_limit_days, retry_count)
         .await?;
     let json = serde_json::to_string_pretty(&site)?;
     let ics = site.to_ics();

@@ -56,7 +56,10 @@ fn event_lines(item: &SsufidCalendar) -> Vec<String> {
 
 fn format_ics_datetime(datetime: OffsetDateTime) -> String {
     let format = format_description!("[year][month][day]T[hour][minute][second]Z");
-    datetime.to_offset(UtcOffset::UTC).format(&format).unwrap()
+    datetime
+        .to_offset(UtcOffset::UTC)
+        .format(&format)
+        .expect("ICS datetime format should always be valid")
 }
 
 fn escape_text(text: &str) -> String {

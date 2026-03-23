@@ -14,14 +14,22 @@ macro_rules! register_plugins {
                 core: Arc<ssufid::SsufidCore>,
                 out_dir: &Path,
                 posts_limit: u32,
+                calendar_limit_days: u32,
                 retry_count: u32,
             ) -> eyre::Result<()> {
+                let _ = calendar_limit_days;
                 match self {
                     $(Self::$post_id(plugin) => {
                         crate::save_run(core, out_dir, plugin, posts_limit, retry_count).await
                     },)*
                     $(Self::$calendar_id(plugin) => {
-                        crate::save_calendar_run(core, out_dir, plugin, posts_limit, retry_count).await
+                        crate::save_calendar_run(
+                            core,
+                            out_dir,
+                            plugin,
+                            calendar_limit_days,
+                            retry_count,
+                        ).await
                     },)*
                 }
             }
@@ -65,6 +73,7 @@ macro_rules! register_plugins {
                             core.clone(),
                             out_dir,
                             options.posts_limit,
+                            options.calendar_limit_days,
                             options.retry_count,
                         ))
                     })
@@ -77,6 +86,7 @@ macro_rules! register_plugins {
                             core.clone(),
                             out_dir,
                             options.posts_limit,
+                            options.calendar_limit_days,
                             options.retry_count,
                         ))
                     })
@@ -89,6 +99,7 @@ macro_rules! register_plugins {
                             core.clone(),
                             out_dir,
                             options.posts_limit,
+                            options.calendar_limit_days,
                             options.retry_count,
                         )
                     })

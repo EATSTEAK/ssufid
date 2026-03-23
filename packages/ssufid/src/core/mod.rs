@@ -24,6 +24,7 @@ pub struct SsufidCore {
 
 impl SsufidCore {
     pub const POST_COUNT_LIMIT: u32 = 100;
+    pub const CALENDAR_DAY_LIMIT: u32 = 30;
     pub const RETRY_COUNT: u32 = 3;
 
     pub fn new(cache_dir: &str) -> Self {
@@ -137,13 +138,13 @@ impl SsufidCore {
     pub async fn run_calendar_with_retry<T: SsufidCalendarPlugin>(
         &self,
         plugin: &T,
-        limit: u32,
+        calendar_limit_days: u32,
         retry_count: u32,
     ) -> Result<SsufidCalendarSiteData, Error> {
         for attempt in 1..=retry_count {
             let start = Instant::now();
 
-            let result = self.run_calendar(plugin, limit).await;
+            let result = self.run_calendar(plugin, calendar_limit_days).await;
 
             if let Ok(data) = &result {
                 let elapsed = start.elapsed();
@@ -154,7 +155,7 @@ impl SsufidCore {
                     id = T::IDENTIFIER,
                     title = T::TITLE,
                     url = T::BASE_URL,
-                    limit,
+                    calendar_limit_days,
                     events = data.items.len(),
                     retry_count,
                     attempt,
@@ -173,7 +174,7 @@ impl SsufidCore {
             id = T::IDENTIFIER,
             title = T::TITLE,
             url = T::BASE_URL,
-            limit,
+            calendar_limit_days,
             retry_count,
             "All {} calendar crawl attempts failed with error",
             retry_count
@@ -185,19 +186,19 @@ impl SsufidCore {
         name = "run_calendar_plugin",
         target = "content_update",
         skip(self, plugin),
-        fields(plugin = T::IDENTIFIER, limit)
+        fields(plugin = T::IDENTIFIER, calendar_limit_days)
     )]
     pub async fn run_calendar<T: SsufidCalendarPlugin>(
         &self,
         plugin: &T,
-        limit: u32,
+        calendar_limit_days: u32,
     ) -> Result<SsufidCalendarSiteData, Error> {
-        let new_entries = plugin.crawl(limit).await.inspect_err(|e| {
+        let new_entries = plugin.crawl(calendar_limit_days).await.inspect_err(|e| {
             tracing::error!(
                 type = "calendar_crawl_attempt_failed",
                 id = T::IDENTIFIER,
                 title = T::TITLE,
-                limit,
+                calendar_limit_days,
                 error = ?e,
                 "Calendar crawl attempt failed"
             )
@@ -206,7 +207,7 @@ impl SsufidCore {
             type = "calendar_crawl_attempt_success",
             id = T::IDENTIFIER,
             title = T::TITLE,
-            limit
+            calendar_limit_days
         );
         let cache = Arc::clone(&self.calendar_cache);
         let updated_entries = {
@@ -225,10 +226,9 @@ impl SsufidCore {
             title: T::TITLE.to_string(),
             source: T::BASE_URL.to_string(),
             description: T::DESCRIPTION.to_string(),
-            items: updated_entries
+            items: filter_calendar_entries_by_days(updated_entries, calendar_limit_days)
                 .into_iter()
                 .rev()
-                .take(Self::POST_COUNT_LIMIT as usize)
                 .collect(),
         })
     }
@@ -300,7 +300,10 @@ impl SsufidCore {
     }
 }
 
-fn merge_entries(old_entries: Vec<SsufidPost>, mut new_entries: Vec<SsufidPost>) -> Vec<SsufidPost> {
+fn merge_entries(
+    old_entries: Vec<SsufidPost>,
+    mut new_entries: Vec<SsufidPost>,
+) -> Vec<SsufidPost> {
     let mut old_entries_map = old_entries
         .into_iter()
         .map(|post: SsufidPost| (post.id.clone(), post))
@@ -346,6 +349,22 @@ fn merge_entries(old_entries: Vec<SsufidPost>, mut new_entries: Vec<SsufidPost>)
         }
     }
     old_entries_map.into_values().collect()
+}
+
+fn filter_calendar_entries_by_days(
+    entries: Vec<SsufidCalendar>,
+    calendar_limit_days: u32,
+) -> Vec<SsufidCalendar> {
+    if calendar_limit_days == 0 {
+        return entries;
+    }
+
+    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::days(calendar_limit_days as i64);
+
+    entries
+        .into_iter()
+        .filter(|item| item.starts_at >= cutoff)
+        .collect()
 }
 
 fn merge_calendar_entries(
@@ -405,7 +424,7 @@ pub trait SsufidPostPlugin: SsufidPlugin {
 pub trait SsufidCalendarPlugin: SsufidPlugin {
     fn crawl(
         &self,
-        limit: u32,
+        calendar_limit_days: u32,
     ) -> impl std::future::Future<Output = Result<Vec<SsufidCalendar>, PluginError>> + Send;
 }
 
@@ -419,7 +438,7 @@ mod tests {
 
     use super::{
         Attachment, SsufidCalendar, SsufidCalendarPlugin, SsufidCore, SsufidPlugin, SsufidPost,
-        merge_calendar_entries, merge_entries,
+        filter_calendar_entries_by_days, merge_calendar_entries, merge_entries,
     };
     use crate::error::PluginError;
 
@@ -435,7 +454,10 @@ mod tests {
     }
 
     impl SsufidCalendarPlugin for MockCalendarPlugin {
-        async fn crawl(&self, _limit: u32) -> Result<Vec<SsufidCalendar>, PluginError> {
+        async fn crawl(
+            &self,
+            _calendar_limit_days: u32,
+        ) -> Result<Vec<SsufidCalendar>, PluginError> {
             Ok(self.items.clone())
         }
     }
@@ -699,6 +721,38 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_calendar_entries_by_days() {
+        let now = OffsetDateTime::now_utc();
+        let entries = vec![
+            SsufidCalendar {
+                id: "old".to_string(),
+                title: "Old Event".to_string(),
+                description: None,
+                starts_at: now - Duration::from_secs(31 * 24 * 3600),
+                ends_at: None,
+                location: None,
+                url: None,
+            },
+            SsufidCalendar {
+                id: "recent".to_string(),
+                title: "Recent Event".to_string(),
+                description: None,
+                starts_at: now - Duration::from_secs(5 * 24 * 3600),
+                ends_at: None,
+                location: None,
+                url: None,
+            },
+        ];
+
+        let filtered = filter_calendar_entries_by_days(entries.clone(), 10);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "recent");
+
+        let unfiltered = filter_calendar_entries_by_days(entries, 0);
+        assert_eq!(unfiltered.len(), 2);
+    }
+
+    #[test]
     fn test_merge_calendar_entries() {
         let now = OffsetDateTime::now_utc();
         let old_entries = vec![
@@ -779,11 +833,53 @@ mod tests {
             ],
         };
 
-        let result = core.run_calendar(&plugin, 10).await.unwrap();
+        let result = core.run_calendar(&plugin, 1000).await.unwrap();
 
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].id, "2");
         assert_eq!(result.items[1].id, "1");
+    }
+
+    #[tokio::test]
+    async fn test_run_calendar_filters_by_days() {
+        let cache_dir = "./run_calendar_cache_filter_test";
+        let core = SsufidCore::new(cache_dir);
+        let now = OffsetDateTime::now_utc();
+        let plugin = MockCalendarPlugin {
+            items: vec![
+                SsufidCalendar {
+                    id: "old".to_string(),
+                    title: "Old Event".to_string(),
+                    description: None,
+                    starts_at: now - Duration::from_secs(40 * 24 * 3600),
+                    ends_at: None,
+                    location: None,
+                    url: None,
+                },
+                SsufidCalendar {
+                    id: "recent".to_string(),
+                    title: "Recent Event".to_string(),
+                    description: None,
+                    starts_at: now - Duration::from_secs(5 * 24 * 3600),
+                    ends_at: None,
+                    location: None,
+                    url: None,
+                },
+            ],
+        };
+
+        let filtered = core.run_calendar(&plugin, 10).await.unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].id, "recent");
+
+        let unfiltered = core.run_calendar(&plugin, 0).await.unwrap();
+        assert_eq!(unfiltered.items.len(), 2);
+        assert_eq!(unfiltered.items[0].id, "recent");
+        assert_eq!(unfiltered.items[1].id, "old");
+
+        if tokio::fs::try_exists(cache_dir).await.unwrap() {
+            tokio::fs::remove_dir_all(cache_dir).await.unwrap();
+        }
 
         if tokio::fs::try_exists(cache_dir).await.unwrap() {
             tokio::fs::remove_dir_all(cache_dir).await.unwrap();

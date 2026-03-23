@@ -27,7 +27,8 @@ impl SsufidCalendar {
     pub fn contents_eq(&self, other: &SsufidCalendar) -> bool {
         self.id.trim() == other.id.trim()
             && self.title.trim() == other.title.trim()
-            && self.description.as_deref().map(str::trim) == other.description.as_deref().map(str::trim)
+            && self.description.as_deref().map(str::trim)
+                == other.description.as_deref().map(str::trim)
             && self.starts_at == other.starts_at
             && self.ends_at == other.ends_at
             && self.location.as_deref().map(str::trim) == other.location.as_deref().map(str::trim)
