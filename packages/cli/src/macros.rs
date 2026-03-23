@@ -1,7 +1,11 @@
 macro_rules! register_plugins {
-    ($($id:ident($plugin:ty) => $initializer:expr),+ $(,)?) => {
+    (
+        post: { $($post_id:ident($post_plugin:ty) => $post_initializer:expr),* $(,)? },
+        calendar: { $($calendar_id:ident($calendar_plugin:ty) => $calendar_initializer:expr),* $(,)? }
+    ) => {
         enum SsufidPluginRegistry {
-            $($id($plugin),)+
+            $($post_id($post_plugin),)*
+            $($calendar_id($calendar_plugin),)*
         }
 
         impl SsufidPluginRegistry {
@@ -13,9 +17,12 @@ macro_rules! register_plugins {
                 retry_count: u32,
             ) -> eyre::Result<()> {
                 match self {
-                    $(Self::$id(plugin) => {
+                    $(Self::$post_id(plugin) => {
                         crate::save_run(core, out_dir, plugin, posts_limit, retry_count).await
-                    }),+
+                    },)*
+                    $(Self::$calendar_id(plugin) => {
+                        crate::save_calendar_run(core, out_dir, plugin, posts_limit, retry_count).await
+                    },)*
                 }
             }
         }
@@ -36,10 +43,18 @@ macro_rules! register_plugins {
                 .not()
                 .then_some(HashSet::from_iter(options.exclude));
             let tasks = [
-                $((
-                    <$plugin>::IDENTIFIER,
-                    SsufidPluginRegistry::$id($initializer),
-                ),)+
+                $(
+                    (
+                        <$post_plugin>::IDENTIFIER,
+                        SsufidPluginRegistry::$post_id($post_initializer),
+                    ),
+                )*
+                $(
+                    (
+                        <$calendar_plugin>::IDENTIFIER,
+                        SsufidPluginRegistry::$calendar_id($calendar_initializer),
+                    ),
+                )*
             ];
 
             if let Some(include) = include {
