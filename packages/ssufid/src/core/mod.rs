@@ -41,31 +41,36 @@ impl SsufidCore {
         posts_limit: u32,
         retry_count: u32,
     ) -> Result<SsufidSiteData, Error> {
+        let mut last_error = None;
+
         for attempt in 1..=retry_count {
             let start = Instant::now();
 
-            let result = self.run(plugin, posts_limit).await;
+            match self.run(plugin, posts_limit).await {
+                Ok(data) => {
+                    let elapsed = start.elapsed();
 
-            if let Ok(data) = &result {
-                let elapsed = start.elapsed();
+                    tracing::info!(
+                        target: "content_update",
+                        type = "crawl_success",
+                        id = T::IDENTIFIER,
+                        title = T::TITLE,
+                        url = T::BASE_URL,
+                        posts_limit,
+                        posts = data.items.len(),
+                        retry_count,
+                        attempt,
+                        elapsed = ?elapsed,
+                        "Successfully crawled {} posts in {:.2}s",
+                        data.items.len(),
+                        elapsed.as_secs_f32()
+                    );
 
-                tracing::info!(
-                    target: "content_update",
-                    type = "crawl_success",
-                    id = T::IDENTIFIER,
-                    title = T::TITLE,
-                    url = T::BASE_URL,
-                    posts_limit,
-                    posts = data.items.len(),
-                    retry_count,
-                    attempt,
-                    elapsed = ?elapsed,
-                    "Successfully crawled {} posts in {:.2}s",
-                    data.items.len(),
-                    elapsed.as_secs_f32()
-                );
-
-                return result;
+                    return Ok(data);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
             }
         }
         tracing::error!(
@@ -76,10 +81,15 @@ impl SsufidCore {
             url = T::BASE_URL,
             posts_limit,
             retry_count,
+            error = ?last_error,
             "All {} crawl attempts failed with error",
             retry_count
         );
-        Err(Error::AttemptsExceeded(T::IDENTIFIER))
+        Err(Error::AttemptsExceeded {
+            plugin: T::IDENTIFIER,
+            attempts: retry_count,
+            source: last_error.map(Box::new),
+        })
     }
 
     #[tracing::instrument(
@@ -95,6 +105,7 @@ impl SsufidCore {
     ) -> Result<SsufidSiteData, Error> {
         let new_entries = plugin.crawl(posts_limit).await.inspect_err(|e| {
             tracing::error!(
+                target: "content_update",
                 type = "crawl_attempt_failed",
                 id = T::IDENTIFIER,
                 title = T::TITLE,
@@ -104,6 +115,7 @@ impl SsufidCore {
             )
         })?;
         tracing::info!(
+            target: "content_update",
             type = "crawl_attempt_success",
             id = T::IDENTIFIER,
             title = T::TITLE,
@@ -141,36 +153,41 @@ impl SsufidCore {
         calendar_range: &CalendarCrawlRange,
         retry_count: u32,
     ) -> Result<SsufidCalendarSiteData, Error> {
+        let mut last_error = None;
+
         for attempt in 1..=retry_count {
             let start = Instant::now();
 
-            let result = self.run_calendar(plugin, calendar_range).await;
+            match self.run_calendar(plugin, calendar_range).await {
+                Ok(data) => {
+                    let elapsed = start.elapsed();
 
-            if let Ok(data) = &result {
-                let elapsed = start.elapsed();
+                    tracing::info!(
+                        target: "content_update",
+                        type = "calendar_crawl_success",
+                        id = T::IDENTIFIER,
+                        title = T::TITLE,
+                        url = T::BASE_URL,
+                        calendar_range_start = %calendar_range.start(),
+                        calendar_range_end = %calendar_range.end(),
+                        events = data.items.len(),
+                        retry_count,
+                        attempt,
+                        elapsed = ?elapsed,
+                        "Successfully crawled {} calendar entries in {:.2}s",
+                        data.items.len(),
+                        elapsed.as_secs_f32()
+                    );
 
-                tracing::info!(
-                    target: "content_update",
-                    type = "calendar_crawl_success",
-                    id = T::IDENTIFIER,
-                    title = T::TITLE,
-                    url = T::BASE_URL,
-                    calendar_range_start = %calendar_range.start(),
-                    calendar_range_end = %calendar_range.end(),
-                    events = data.items.len(),
-                    retry_count,
-                    attempt,
-                    elapsed = ?elapsed,
-                    "Successfully crawled {} calendar entries in {:.2}s",
-                    data.items.len(),
-                    elapsed.as_secs_f32()
-                );
-
-                return result;
+                    return Ok(data);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
             }
         }
         tracing::error!(
-            target = "content_update",
+            target: "content_update",
             type = "calendar_crawl_failed",
             id = T::IDENTIFIER,
             title = T::TITLE,
@@ -178,10 +195,15 @@ impl SsufidCore {
             calendar_range_start = %calendar_range.start(),
             calendar_range_end = %calendar_range.end(),
             retry_count,
+            error = ?last_error,
             "All {} calendar crawl attempts failed with error",
             retry_count
         );
-        Err(Error::AttemptsExceeded(T::IDENTIFIER))
+        Err(Error::AttemptsExceeded {
+            plugin: T::IDENTIFIER,
+            attempts: retry_count,
+            source: last_error.map(Box::new),
+        })
     }
 
     #[tracing::instrument(
@@ -201,6 +223,7 @@ impl SsufidCore {
     ) -> Result<SsufidCalendarSiteData, Error> {
         let new_entries = plugin.crawl(calendar_range).await.inspect_err(|e| {
             tracing::error!(
+                target: "content_update",
                 type = "calendar_crawl_attempt_failed",
                 id = T::IDENTIFIER,
                 title = T::TITLE,
@@ -212,6 +235,7 @@ impl SsufidCore {
         })?;
         let new_entries = filter_calendar_entries_by_range(new_entries, calendar_range);
         tracing::info!(
+            target: "content_update",
             type = "calendar_crawl_attempt_success",
             id = T::IDENTIFIER,
             title = T::TITLE,
@@ -443,10 +467,10 @@ mod tests {
 
     use super::{
         Attachment, CalendarCrawlRange, SsufidCalendar, SsufidCalendarPlugin, SsufidCore,
-        SsufidPlugin, SsufidPost, filter_calendar_entries_by_range, merge_calendar_entries,
-        merge_entries,
+        SsufidPlugin, SsufidPost, SsufidPostPlugin, filter_calendar_entries_by_range,
+        merge_calendar_entries, merge_entries,
     };
-    use crate::error::PluginError;
+    use crate::error::{Error, PluginError};
 
     struct MockCalendarPlugin {
         items: Vec<SsufidCalendar>,
@@ -465,6 +489,49 @@ mod tests {
             _calendar_range: &CalendarCrawlRange,
         ) -> Result<Vec<SsufidCalendar>, PluginError> {
             Ok(self.items.clone())
+        }
+    }
+
+    struct MockPostPlugin {
+        error_name: String,
+        error_message: String,
+    }
+
+    impl SsufidPlugin for MockPostPlugin {
+        const TITLE: &'static str = "Mock Post";
+        const IDENTIFIER: &'static str = "mock.post";
+        const DESCRIPTION: &'static str = "Mock post plugin for tests";
+        const BASE_URL: &'static str = "https://example.com/post";
+    }
+
+    impl SsufidPostPlugin for MockPostPlugin {
+        async fn crawl(&self, _posts_limit: u32) -> Result<Vec<SsufidPost>, PluginError> {
+            Err(PluginError::custom::<MockPostPlugin>(
+                self.error_name.clone(),
+                self.error_message.clone(),
+            ))
+        }
+    }
+
+    struct MockFailingCalendarPlugin {
+        error_message: String,
+    }
+
+    impl SsufidPlugin for MockFailingCalendarPlugin {
+        const TITLE: &'static str = "Mock Failing Calendar";
+        const IDENTIFIER: &'static str = "mock.failing.calendar";
+        const DESCRIPTION: &'static str = "Mock failing calendar plugin for tests";
+        const BASE_URL: &'static str = "https://example.com/failing-calendar";
+    }
+
+    impl SsufidCalendarPlugin for MockFailingCalendarPlugin {
+        async fn crawl(
+            &self,
+            _calendar_range: &CalendarCrawlRange,
+        ) -> Result<Vec<SsufidCalendar>, PluginError> {
+            Err(PluginError::parse::<MockFailingCalendarPlugin>(
+                self.error_message.clone(),
+            ))
         }
     }
 
@@ -899,17 +966,15 @@ mod tests {
         cache_file.flush().await.unwrap();
 
         let plugin = MockCalendarPlugin {
-            items: vec![
-                SsufidCalendar {
-                    id: "fresh".to_string(),
-                    title: "Fresh Event".to_string(),
-                    description: None,
-                    starts_at: datetime!(2024-03-20 12:00:00 UTC),
-                    ends_at: None,
-                    location: None,
-                    url: None,
-                },
-            ],
+            items: vec![SsufidCalendar {
+                id: "fresh".to_string(),
+                title: "Fresh Event".to_string(),
+                description: None,
+                starts_at: datetime!(2024-03-20 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
+            }],
         };
         let range = CalendarCrawlRange::new(
             datetime!(2024-03-01 00:00:00 UTC),
@@ -929,6 +994,73 @@ mod tests {
 
         if tokio::fs::try_exists(cache_dir).await.unwrap() {
             tokio::fs::remove_dir_all(cache_dir).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_with_retry_preserves_last_error() {
+        let core = SsufidCore::new("./retry_post_test");
+        let plugin = MockPostPlugin {
+            error_name: "network".to_string(),
+            error_message: "last post failure".to_string(),
+        };
+
+        let error = core.run_with_retry(&plugin, 10, 2).await.unwrap_err();
+        match error {
+            Error::AttemptsExceeded {
+                plugin,
+                attempts,
+                source,
+            } => {
+                assert_eq!(plugin, MockPostPlugin::IDENTIFIER);
+                assert_eq!(attempts, 2);
+                let source = source.expect("missing preserved source error");
+                match *source {
+                    Error::Plugin(plugin_error) => {
+                        assert_eq!(plugin_error.plugin(), MockPostPlugin::IDENTIFIER);
+                        assert_eq!(plugin_error.message(), "last post failure");
+                    }
+                    other => panic!("unexpected source error: {other:?}"),
+                }
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_calendar_with_retry_preserves_last_error() {
+        let core = SsufidCore::new("./retry_calendar_test");
+        let plugin = MockFailingCalendarPlugin {
+            error_message: "last calendar failure".to_string(),
+        };
+        let range = CalendarCrawlRange::new(
+            datetime!(2024-03-01 00:00:00 UTC),
+            datetime!(2024-03-31 23:59:59 UTC),
+        )
+        .unwrap();
+
+        let error = core
+            .run_calendar_with_retry(&plugin, &range, 3)
+            .await
+            .unwrap_err();
+        match error {
+            Error::AttemptsExceeded {
+                plugin,
+                attempts,
+                source,
+            } => {
+                assert_eq!(plugin, MockFailingCalendarPlugin::IDENTIFIER);
+                assert_eq!(attempts, 3);
+                let source = source.expect("missing preserved source error");
+                match *source {
+                    Error::Plugin(plugin_error) => {
+                        assert_eq!(plugin_error.plugin(), MockFailingCalendarPlugin::IDENTIFIER);
+                        assert_eq!(plugin_error.message(), "last calendar failure");
+                    }
+                    other => panic!("unexpected source error: {other:?}"),
+                }
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 }

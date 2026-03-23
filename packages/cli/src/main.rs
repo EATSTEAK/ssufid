@@ -5,10 +5,6 @@ use futures::future::join_all;
 use ssufid::core::{
     CalendarCrawlRange, SsufidCalendarPlugin, SsufidCore, SsufidPlugin, SsufidPostPlugin,
 };
-use time::{
-    Date, Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset,
-    macros::{format_description, offset},
-};
 use ssufid_biz::BizPlugin;
 use ssufid_chemeng::ChemEngPlugin;
 use ssufid_common::sites::*;
@@ -27,6 +23,10 @@ use ssufid_ssupath::{SsuPathCredential, SsuPathPlugin};
 use ssufid_startup::StartupPlugin;
 use ssufid_stu::StuPlugin;
 use ssufid_study::StudyPlugin;
+use time::{
+    Date, Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset,
+    macros::{format_description, offset},
+};
 use tokio::io::AsyncWriteExt;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{Layer, filter, layer::SubscriberExt as _, util::SubscriberInitExt};
@@ -234,13 +234,15 @@ pub(crate) async fn save_calendar_run<T: SsufidCalendarPlugin>(
 fn validate_calendar_range_flags(options: &SsufidDaemonOptions) -> eyre::Result<()> {
     match (&options.calendar_start_date, &options.calendar_end_date) {
         (Some(_), Some(_)) | (None, None) => Ok(()),
-        _ => eyre::bail!(
-            "--calendar-start-date and --calendar-end-date must be provided together."
-        ),
+        _ => {
+            eyre::bail!("--calendar-start-date and --calendar-end-date must be provided together.")
+        }
     }
 }
 
-fn calendar_crawl_range_from_options(options: &SsufidDaemonOptions) -> eyre::Result<CalendarCrawlRange> {
+fn calendar_crawl_range_from_options(
+    options: &SsufidDaemonOptions,
+) -> eyre::Result<CalendarCrawlRange> {
     match (&options.calendar_start_date, &options.calendar_end_date) {
         (Some(start), Some(end)) => CalendarCrawlRange::new(
             parse_calendar_start_date(start)?,

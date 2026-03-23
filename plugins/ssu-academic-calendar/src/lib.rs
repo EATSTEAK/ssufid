@@ -532,7 +532,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(SsuAcademicCalendarPlugin::target_years(&range), vec![2025, 2026]);
+        assert_eq!(
+            SsuAcademicCalendarPlugin::target_years(&range),
+            vec![2025, 2026]
+        );
     }
 
     #[test]
@@ -543,7 +546,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(SsuAcademicCalendarPlugin::target_years(&range), vec![2026, 2027]);
+        assert_eq!(
+            SsuAcademicCalendarPlugin::target_years(&range),
+            vec![2026, 2027]
+        );
     }
 
     #[tokio::test]
