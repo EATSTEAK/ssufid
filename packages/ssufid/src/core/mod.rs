@@ -13,7 +13,7 @@ use crate::error::{Error, PluginError};
 mod calendar;
 pub mod post;
 
-pub use calendar::{SsufidCalendar, SsufidCalendarSiteData};
+pub use calendar::{CalendarCrawlRange, SsufidCalendar, SsufidCalendarSiteData};
 pub use post::{Attachment, SsufidPost, SsufidSiteData};
 
 pub struct SsufidCore {
@@ -138,13 +138,13 @@ impl SsufidCore {
     pub async fn run_calendar_with_retry<T: SsufidCalendarPlugin>(
         &self,
         plugin: &T,
-        calendar_limit_days: u32,
+        calendar_range: &CalendarCrawlRange,
         retry_count: u32,
     ) -> Result<SsufidCalendarSiteData, Error> {
         for attempt in 1..=retry_count {
             let start = Instant::now();
 
-            let result = self.run_calendar(plugin, calendar_limit_days).await;
+            let result = self.run_calendar(plugin, calendar_range).await;
 
             if let Ok(data) = &result {
                 let elapsed = start.elapsed();
@@ -155,7 +155,8 @@ impl SsufidCore {
                     id = T::IDENTIFIER,
                     title = T::TITLE,
                     url = T::BASE_URL,
-                    calendar_limit_days,
+                    calendar_range_start = %calendar_range.start(),
+                    calendar_range_end = %calendar_range.end(),
                     events = data.items.len(),
                     retry_count,
                     attempt,
@@ -169,12 +170,13 @@ impl SsufidCore {
             }
         }
         tracing::error!(
-            target: "content_update",
+            target = "content_update",
             type = "calendar_crawl_failed",
             id = T::IDENTIFIER,
             title = T::TITLE,
             url = T::BASE_URL,
-            calendar_limit_days,
+            calendar_range_start = %calendar_range.start(),
+            calendar_range_end = %calendar_range.end(),
             retry_count,
             "All {} calendar crawl attempts failed with error",
             retry_count
@@ -185,29 +187,36 @@ impl SsufidCore {
     #[tracing::instrument(
         name = "run_calendar_plugin",
         target = "content_update",
-        skip(self, plugin),
-        fields(plugin = T::IDENTIFIER, calendar_limit_days)
+        skip(self, plugin, calendar_range),
+        fields(
+            plugin = T::IDENTIFIER,
+            calendar_range_start = %calendar_range.start(),
+            calendar_range_end = %calendar_range.end()
+        )
     )]
     pub async fn run_calendar<T: SsufidCalendarPlugin>(
         &self,
         plugin: &T,
-        calendar_limit_days: u32,
+        calendar_range: &CalendarCrawlRange,
     ) -> Result<SsufidCalendarSiteData, Error> {
-        let new_entries = plugin.crawl(calendar_limit_days).await.inspect_err(|e| {
+        let new_entries = plugin.crawl(calendar_range).await.inspect_err(|e| {
             tracing::error!(
                 type = "calendar_crawl_attempt_failed",
                 id = T::IDENTIFIER,
                 title = T::TITLE,
-                calendar_limit_days,
+                calendar_range_start = %calendar_range.start(),
+                calendar_range_end = %calendar_range.end(),
                 error = ?e,
                 "Calendar crawl attempt failed"
             )
         })?;
+        let new_entries = filter_calendar_entries_by_range(new_entries, calendar_range);
         tracing::info!(
             type = "calendar_crawl_attempt_success",
             id = T::IDENTIFIER,
             title = T::TITLE,
-            calendar_limit_days
+            calendar_range_start = %calendar_range.start(),
+            calendar_range_end = %calendar_range.end()
         );
         let cache = Arc::clone(&self.calendar_cache);
         let updated_entries = {
@@ -216,7 +225,7 @@ impl SsufidCore {
                 Some(entries) => entries.clone(),
                 None => self.read_calendar_cache(T::IDENTIFIER).await?,
             };
-            merge_calendar_entries(old_entries, new_entries)
+            merge_calendar_entries(old_entries, new_entries, calendar_range)
         };
         {
             let mut cache = cache.write().await;
@@ -226,7 +235,7 @@ impl SsufidCore {
             title: T::TITLE.to_string(),
             source: T::BASE_URL.to_string(),
             description: T::DESCRIPTION.to_string(),
-            items: filter_calendar_entries_by_days(updated_entries, calendar_limit_days)
+            items: filter_calendar_entries_by_range(updated_entries, calendar_range)
                 .into_iter()
                 .rev()
                 .collect(),
@@ -351,28 +360,24 @@ fn merge_entries(
     old_entries_map.into_values().collect()
 }
 
-fn filter_calendar_entries_by_days(
+fn filter_calendar_entries_by_range(
     entries: Vec<SsufidCalendar>,
-    calendar_limit_days: u32,
+    calendar_range: &CalendarCrawlRange,
 ) -> Vec<SsufidCalendar> {
-    if calendar_limit_days == 0 {
-        return entries;
-    }
-
-    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::days(calendar_limit_days as i64);
-
     entries
         .into_iter()
-        .filter(|item| item.starts_at >= cutoff)
+        .filter(|item| calendar_range.contains_start(item.starts_at))
         .collect()
 }
 
 fn merge_calendar_entries(
     old_entries: Vec<SsufidCalendar>,
     mut new_entries: Vec<SsufidCalendar>,
+    calendar_range: &CalendarCrawlRange,
 ) -> Vec<SsufidCalendar> {
     let mut old_entries_map = old_entries
         .into_iter()
+        .filter(|item| !calendar_range.contains_start(item.starts_at))
         .map(|item: SsufidCalendar| (item.id.clone(), item))
         .collect::<IndexMap<String, SsufidCalendar>>();
     old_entries_map
@@ -424,7 +429,7 @@ pub trait SsufidPostPlugin: SsufidPlugin {
 pub trait SsufidCalendarPlugin: SsufidPlugin {
     fn crawl(
         &self,
-        calendar_limit_days: u32,
+        calendar_range: &CalendarCrawlRange,
     ) -> impl std::future::Future<Output = Result<Vec<SsufidCalendar>, PluginError>> + Send;
 }
 
@@ -437,8 +442,9 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::{
-        Attachment, SsufidCalendar, SsufidCalendarPlugin, SsufidCore, SsufidPlugin, SsufidPost,
-        filter_calendar_entries_by_days, merge_calendar_entries, merge_entries,
+        Attachment, CalendarCrawlRange, SsufidCalendar, SsufidCalendarPlugin, SsufidCore,
+        SsufidPlugin, SsufidPost, filter_calendar_entries_by_range, merge_calendar_entries,
+        merge_entries,
     };
     use crate::error::PluginError;
 
@@ -456,7 +462,7 @@ mod tests {
     impl SsufidCalendarPlugin for MockCalendarPlugin {
         async fn crawl(
             &self,
-            _calendar_limit_days: u32,
+            _calendar_range: &CalendarCrawlRange,
         ) -> Result<Vec<SsufidCalendar>, PluginError> {
             Ok(self.items.clone())
         }
@@ -721,14 +727,13 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_calendar_entries_by_days() {
-        let now = OffsetDateTime::now_utc();
+    fn test_filter_calendar_entries_by_range() {
         let entries = vec![
             SsufidCalendar {
                 id: "old".to_string(),
                 title: "Old Event".to_string(),
                 description: None,
-                starts_at: now - Duration::from_secs(31 * 24 * 3600),
+                starts_at: datetime!(2024-02-10 00:00:00 UTC),
                 ends_at: None,
                 location: None,
                 url: None,
@@ -737,39 +742,49 @@ mod tests {
                 id: "recent".to_string(),
                 title: "Recent Event".to_string(),
                 description: None,
-                starts_at: now - Duration::from_secs(5 * 24 * 3600),
+                starts_at: datetime!(2024-03-20 00:00:00 UTC),
                 ends_at: None,
                 location: None,
                 url: None,
             },
         ];
+        let range = CalendarCrawlRange::new(
+            datetime!(2024-03-01 00:00:00 UTC),
+            datetime!(2024-03-31 23:59:59 UTC),
+        )
+        .unwrap();
 
-        let filtered = filter_calendar_entries_by_days(entries.clone(), 10);
+        let filtered = filter_calendar_entries_by_range(entries, &range);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "recent");
-
-        let unfiltered = filter_calendar_entries_by_days(entries, 0);
-        assert_eq!(unfiltered.len(), 2);
     }
 
     #[test]
-    fn test_merge_calendar_entries() {
-        let now = OffsetDateTime::now_utc();
+    fn test_merge_calendar_entries_overwrites_only_inside_range() {
         let old_entries = vec![
             SsufidCalendar {
-                id: "1".to_string(),
-                title: "Old Event 1".to_string(),
-                description: Some("Old Description 1".to_string()),
-                starts_at: now,
-                ends_at: Some(now + Duration::from_secs(3600)),
-                location: Some("Room A".to_string()),
-                url: Some("https://example.com/events/1".to_string()),
+                id: "outside".to_string(),
+                title: "Outside Range".to_string(),
+                description: None,
+                starts_at: datetime!(2024-02-20 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
             },
             SsufidCalendar {
-                id: "0".to_string(),
-                title: "Older Event".to_string(),
+                id: "inside-stale".to_string(),
+                title: "Stale Inside Range".to_string(),
                 description: None,
-                starts_at: now - Duration::from_secs(3600),
+                starts_at: datetime!(2024-03-15 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
+            },
+            SsufidCalendar {
+                id: "inside-updated".to_string(),
+                title: "Old Title".to_string(),
+                description: None,
+                starts_at: datetime!(2024-03-16 12:00:00 UTC),
                 ends_at: None,
                 location: None,
                 url: None,
@@ -778,32 +793,37 @@ mod tests {
 
         let new_entries = vec![
             SsufidCalendar {
-                id: "1".to_string(),
-                title: "Old Event 1".to_string(),
-                description: Some("Old Description 1".to_string()),
-                starts_at: now,
-                ends_at: Some(now + Duration::from_secs(3600)),
-                location: Some("Room A".to_string()),
-                url: Some("https://example.com/events/1".to_string()),
+                id: "inside-updated".to_string(),
+                title: "New Title".to_string(),
+                description: None,
+                starts_at: datetime!(2024-03-16 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
             },
             SsufidCalendar {
-                id: "2".to_string(),
-                title: "Updated Event 2".to_string(),
-                description: Some("Updated Description 2".to_string()),
-                starts_at: now + Duration::from_secs(1800),
-                ends_at: Some(now + Duration::from_secs(5400)),
-                location: Some("Room B".to_string()),
-                url: Some("https://example.com/events/2".to_string()),
+                id: "inside-new".to_string(),
+                title: "Brand New Inside Range".to_string(),
+                description: None,
+                starts_at: datetime!(2024-03-18 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
             },
         ];
+        let range = CalendarCrawlRange::new(
+            datetime!(2024-03-01 00:00:00 UTC),
+            datetime!(2024-03-31 23:59:59 UTC),
+        )
+        .unwrap();
 
-        let result = merge_calendar_entries(old_entries, new_entries);
+        let result = merge_calendar_entries(old_entries, new_entries, &range);
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].id, "0");
-        assert_eq!(result[1].id, "1");
-        assert_eq!(result[2].id, "2");
-        assert_eq!(result[2].title, "Updated Event 2");
+        assert_eq!(result[0].id, "outside");
+        assert_eq!(result[1].id, "inside-updated");
+        assert_eq!(result[1].title, "New Title");
+        assert_eq!(result[2].id, "inside-new");
     }
 
     #[tokio::test]
@@ -832,8 +852,13 @@ mod tests {
                 },
             ],
         };
+        let range = CalendarCrawlRange::new(
+            datetime!(2024-03-01 00:00:00 UTC),
+            datetime!(2024-03-31 23:59:59 UTC),
+        )
+        .unwrap();
 
-        let result = core.run_calendar(&plugin, 1000).await.unwrap();
+        let result = core.run_calendar(&plugin, &range).await.unwrap();
 
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].id, "2");
@@ -841,45 +866,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_calendar_filters_by_days() {
+    async fn test_run_calendar_filters_and_replaces_range_cache() {
         let cache_dir = "./run_calendar_cache_filter_test";
         let core = SsufidCore::new(cache_dir);
-        let now = OffsetDateTime::now_utc();
+        let cache_dir_path = std::path::Path::new(cache_dir).join("calendar");
+        tokio::fs::create_dir_all(&cache_dir_path).await.unwrap();
+
+        let cached_entries = vec![
+            SsufidCalendar {
+                id: "outside".to_string(),
+                title: "Outside Range".to_string(),
+                description: None,
+                starts_at: datetime!(2024-02-10 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
+            },
+            SsufidCalendar {
+                id: "stale".to_string(),
+                title: "Stale Event".to_string(),
+                description: None,
+                starts_at: datetime!(2024-03-05 12:00:00 UTC),
+                ends_at: None,
+                location: None,
+                url: None,
+            },
+        ];
+        let cache_json = serde_json::to_string_pretty(&cached_entries).unwrap();
+        let cache_file_path = cache_dir_path.join("mock.calendar.json");
+        let mut cache_file = tokio::fs::File::create(&cache_file_path).await.unwrap();
+        cache_file.write_all(cache_json.as_bytes()).await.unwrap();
+        cache_file.flush().await.unwrap();
+
         let plugin = MockCalendarPlugin {
             items: vec![
                 SsufidCalendar {
-                    id: "old".to_string(),
-                    title: "Old Event".to_string(),
+                    id: "fresh".to_string(),
+                    title: "Fresh Event".to_string(),
                     description: None,
-                    starts_at: now - Duration::from_secs(40 * 24 * 3600),
-                    ends_at: None,
-                    location: None,
-                    url: None,
-                },
-                SsufidCalendar {
-                    id: "recent".to_string(),
-                    title: "Recent Event".to_string(),
-                    description: None,
-                    starts_at: now - Duration::from_secs(5 * 24 * 3600),
+                    starts_at: datetime!(2024-03-20 12:00:00 UTC),
                     ends_at: None,
                     location: None,
                     url: None,
                 },
             ],
         };
+        let range = CalendarCrawlRange::new(
+            datetime!(2024-03-01 00:00:00 UTC),
+            datetime!(2024-03-31 23:59:59 UTC),
+        )
+        .unwrap();
 
-        let filtered = core.run_calendar(&plugin, 10).await.unwrap();
-        assert_eq!(filtered.items.len(), 1);
-        assert_eq!(filtered.items[0].id, "recent");
+        let result = core.run_calendar(&plugin, &range).await.unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, "fresh");
 
-        let unfiltered = core.run_calendar(&plugin, 0).await.unwrap();
-        assert_eq!(unfiltered.items.len(), 2);
-        assert_eq!(unfiltered.items[0].id, "recent");
-        assert_eq!(unfiltered.items[1].id, "old");
-
-        if tokio::fs::try_exists(cache_dir).await.unwrap() {
-            tokio::fs::remove_dir_all(cache_dir).await.unwrap();
-        }
+        let cache = core.calendar_cache.read().await;
+        let merged_cache = cache.get("mock.calendar").unwrap();
+        assert_eq!(merged_cache.len(), 2);
+        assert_eq!(merged_cache[0].id, "outside");
+        assert_eq!(merged_cache[1].id, "fresh");
 
         if tokio::fs::try_exists(cache_dir).await.unwrap() {
             tokio::fs::remove_dir_all(cache_dir).await.unwrap();
