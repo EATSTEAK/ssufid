@@ -1,83 +1,16 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use time;
 use tokio::sync::RwLock;
 use tokio::{io::AsyncWriteExt, time::Instant};
 
 use crate::error::{Error, PluginError};
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-pub struct Attachment {
-    pub url: String,
-    pub name: Option<String>,
-    pub mime_type: Option<String>,
-}
+mod calendar;
+pub mod post;
 
-impl Attachment {
-    pub fn from_guess(name: String, url: String) -> Self {
-        let mime = mime_guess::from_path(&name).first().map(|m| m.to_string());
-        Self {
-            url,
-            name: Some(name),
-            mime_type: mime,
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-pub struct SsufidPost {
-    pub id: String,
-    pub url: String,
-    pub author: Option<String>,
-    pub title: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub category: Vec<String>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: time::OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub updated_at: Option<time::OffsetDateTime>,
-    pub thumbnail: Option<String>,
-    pub content: String,
-    #[serde(default)]
-    pub attachments: Vec<Attachment>,
-    pub metadata: Option<BTreeMap<String, String>>,
-}
-
-impl PartialOrd for SsufidPost {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.created_at.cmp(&other.created_at))
-    }
-}
-
-impl SsufidPost {
-    pub fn contents_eq(&self, other: &SsufidPost) -> bool {
-        self.id.trim() == other.id.trim()
-            && self.title.trim() == other.title.trim()
-            && self.category == other.category
-            && self.content.trim() == other.content.trim()
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-pub struct SsufidSiteData {
-    title: String,
-    source: String,
-    description: String,
-    items: Vec<SsufidPost>,
-}
-
-#[cfg(feature = "rss")]
-impl SsufidSiteData {
-    pub fn to_rss(self) -> ::rss::Channel {
-        self.into()
-    }
-}
+pub use calendar::SsufidCalendar;
+pub use post::{Attachment, SsufidPost, SsufidSiteData};
 
 pub struct SsufidCore {
     cache: Arc<RwLock<HashMap<String, Vec<SsufidPost>>>>,
@@ -95,7 +28,7 @@ impl SsufidCore {
         }
     }
 
-    pub async fn run_with_retry<T: SsufidPlugin>(
+    pub async fn run_with_retry<T: SsufidPostPlugin>(
         &self,
         plugin: &T,
         posts_limit: u32,
@@ -148,7 +81,7 @@ impl SsufidCore {
         skip(self, plugin),
         fields(plugin = T::IDENTIFIER, posts_limit)
     )]
-    pub async fn run<T: SsufidPlugin>(
+    pub async fn run<T: SsufidPostPlugin>(
         &self,
         plugin: &T,
         posts_limit: u32,
@@ -288,11 +221,20 @@ pub trait SsufidPlugin {
     const IDENTIFIER: &'static str;
     const DESCRIPTION: &'static str;
     const BASE_URL: &'static str;
+}
 
+pub trait SsufidPostPlugin: SsufidPlugin {
     fn crawl(
         &self,
         posts_limit: u32,
     ) -> impl std::future::Future<Output = Result<Vec<SsufidPost>, PluginError>> + Send;
+}
+
+pub trait SsufidCalendarPlugin: SsufidPlugin {
+    fn crawl(
+        &self,
+        limit: u32,
+    ) -> impl std::future::Future<Output = Result<Vec<SsufidCalendar>, PluginError>> + Send;
 }
 
 // 임시 테스트

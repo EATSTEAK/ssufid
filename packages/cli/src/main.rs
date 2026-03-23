@@ -2,7 +2,7 @@ use std::{collections::HashSet, fs::File, io::BufWriter, ops::Not, path::Path, s
 
 use clap::Parser;
 use futures::future::join_all;
-use ssufid::core::{SsufidCore, SsufidPlugin};
+use ssufid::core::{SsufidCore, SsufidPlugin, SsufidPostPlugin};
 use ssufid_biz::BizPlugin;
 use ssufid_chemeng::ChemEngPlugin;
 use ssufid_common::sites::*;
@@ -156,7 +156,7 @@ register_plugins! {
     SwGraduate(SwGraduatePlugin) => SwGraduatePlugin::new(),
 }
 
-pub(crate) async fn save_run<T: SsufidPlugin>(
+pub(crate) async fn save_run<T: SsufidPostPlugin>(
     core: Arc<SsufidCore>,
     base_out_dir: &Path,
     plugin: T,
